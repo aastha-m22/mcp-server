@@ -19,8 +19,8 @@ K8s API interaction tests require mocking the SDK and are marked as TODOs.
 """
 
 from __future__ import annotations
-from types import SimpleNamespace
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
