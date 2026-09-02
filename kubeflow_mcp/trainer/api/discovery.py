@@ -28,7 +28,7 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
 )
-from kubeflow_mcp.core.security import check_namespace_allowed
+from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,11 @@ def list_training_jobs(
         >>> list_training_jobs(status="Running")
         {"data": {"jobs": [{"name": "fine-tune-abc", "status": "Running"}], "total": 1}}
     """
+    if runtime:
+        runtime_err = validate_k8s_name(runtime, "runtime")
+        if runtime_err is not None:
+            return runtime_err.model_dump()
+
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
@@ -134,6 +139,10 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
     """
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
@@ -183,7 +192,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
 
 
 def list_runtimes() -> dict[str, Any]:
-    """List available ClusterTrainingRuntimes.
+    """List available TrainingRuntimes and ClusterTrainingRuntimes.
 
     Call this if ``fine_tune()`` fails with "runtime not found" to see
     what runtimes are installed in the cluster.
@@ -222,31 +231,50 @@ def list_runtimes() -> dict[str, Any]:
         ).model_dump()
 
 
-def _get_runtime_image(name: str) -> str | None:
-    """Extract container image from a ClusterTrainingRuntime CRD."""
-    api = get_custom_objects_api()
-    rt = api.get_cluster_custom_object(
-        group="trainer.kubeflow.org",
-        version="v1alpha1",
-        plural="clustertrainingruntimes",
-        name=name,
-    )
-    for rj in rt.get("spec", {}).get("template", {}).get("spec", {}).get("replicatedJobs", []):
-        containers = (
-            rj.get("template", {})
-            .get("spec", {})
-            .get("template", {})
-            .get("spec", {})
-            .get("containers", [])
+def _get_runtime_image(name: str, runtime_obj: Any = None) -> str | None:
+    """Extract container image from an SDK Runtime or ClusterTrainingRuntime CRD."""
+    if runtime_obj is not None:
+        trainer = getattr(runtime_obj, "trainer", None)
+        image = getattr(trainer, "image", None) if trainer is not None else None
+        if image:
+            return str(image)
+    else:
+        try:
+            client = get_trainer_client()
+            rt = client.get_runtime(name=name)
+            trainer = getattr(rt, "trainer", None)
+            image = getattr(trainer, "image", None) if trainer is not None else None
+            if image:
+                return str(image)
+        except Exception:
+            pass
+
+    try:
+        api = get_custom_objects_api()
+        rt = api.get_cluster_custom_object(
+            group="trainer.kubeflow.org",
+            version="v1alpha1",
+            plural="clustertrainingruntimes",
+            name=name,
         )
-        for c in containers:
-            img = c.get("image")
-            if img:
-                return img
+        for rj in rt.get("spec", {}).get("template", {}).get("spec", {}).get("replicatedJobs", []):
+            containers = (
+                rj.get("template", {})
+                .get("spec", {})
+                .get("template", {})
+                .get("spec", {})
+                .get("containers", [])
+            )
+            for c in containers:
+                img = c.get("image")
+                if img:
+                    return str(img)
+    except Exception:
+        pass
     return None
 
 
-def _fetch_packages_via_pod(runtime_name: str) -> dict[str, Any]:
+def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[str, Any]:
     """Create a lightweight Pod to run ``pip list`` using the runtime's image.
 
     Creates a temporary Pod from the runtime's container image to list packages.
@@ -255,7 +283,7 @@ def _fetch_packages_via_pod(runtime_name: str) -> dict[str, Any]:
     The pod includes emptyDir volumes for writable directories so it works
     on platforms with read-only root filesystems.
     """
-    image = _get_runtime_image(runtime_name)
+    image = _get_runtime_image(runtime_name, runtime_obj=runtime_obj)
     if not image:
         return {
             "packages_error": f"Could not extract container image from runtime '{runtime_name}'"
@@ -351,8 +379,64 @@ def _fetch_packages_via_pod(runtime_name: str) -> dict[str, Any]:
             logger.warning("Failed to delete pip-list pod %s/%s", ns, pod_name)
 
 
+def _extract_runtime_metadata(rt: Any) -> dict[str, Any]:
+    """Extract runtime details from SDK Runtime object or CRD spec."""
+    rt_name = rt.name if hasattr(rt, "name") else str(rt)
+    data: dict[str, Any] = {"name": rt_name}
+
+    trainer = getattr(rt, "trainer", None)
+    if trainer is not None:
+        framework = getattr(trainer, "framework", None)
+        if framework:
+            data["framework"] = framework
+        image = getattr(trainer, "image", None)
+        if image:
+            data["image"] = str(image)
+        num_nodes = getattr(trainer, "num_nodes", None)
+        if num_nodes is not None:
+            data["num_nodes"] = num_nodes
+        device = getattr(trainer, "device", None)
+        if device and device != "UNKNOWN":
+            data["device"] = device
+        device_count = getattr(trainer, "device_count", None)
+        if device_count and device_count != "UNKNOWN":
+            data["device_count"] = device_count
+        tt = getattr(trainer, "trainer_type", None)
+        if tt is not None:
+            data["trainer_type"] = getattr(tt, "value", str(tt))
+
+    pretrained_model = getattr(rt, "pretrained_model", None)
+    if pretrained_model:
+        data["pretrained_model"] = pretrained_model
+
+    spec = getattr(rt, "spec", None)
+    if spec is not None:
+        ml_policy = getattr(spec, "ml_policy", None)
+        if "framework" not in data:
+            framework = getattr(ml_policy, "torch", None) or getattr(ml_policy, "mpi", None)
+            if framework:
+                data["framework"] = framework
+        template = getattr(spec, "template", None)
+        if template is not None:
+            replicated_jobs = getattr(getattr(template, "spec", None), "replicated_jobs", None)
+            if replicated_jobs:
+                data["replicated_jobs"] = [
+                    {
+                        "name": getattr(rj, "name", None),
+                        "replicas": getattr(
+                            getattr(getattr(rj, "template", None), "spec", None),
+                            "completions",
+                            None,
+                        ),
+                    }
+                    for rj in replicated_jobs
+                ]
+
+    return data
+
+
 def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
-    """Get ClusterTrainingRuntime configuration.
+    """Get TrainingRuntime or ClusterTrainingRuntime configuration.
 
     Args:
         name: Runtime name (e.g., ``torch-distributed``).
@@ -366,36 +450,17 @@ def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
     Raises:
         ToolError: If runtime not found (``RESOURCE_NOT_FOUND``).
     """
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     try:
         client = get_trainer_client()
         rt = client.get_runtime(name=name)
-
-        rt_name = rt.name if hasattr(rt, "name") else name
-
-        data: dict[str, Any] = {"name": rt_name}
-
-        spec = getattr(rt, "spec", None)
-        if spec is not None:
-            ml_policy = getattr(spec, "ml_policy", None)
-            data["framework"] = getattr(ml_policy, "torch", None) or getattr(ml_policy, "mpi", None)
-            template = getattr(spec, "template", None)
-            if template is not None:
-                replicated_jobs = getattr(getattr(template, "spec", None), "replicated_jobs", None)
-                if replicated_jobs:
-                    data["replicated_jobs"] = [
-                        {
-                            "name": getattr(rj, "name", None),
-                            "replicas": getattr(
-                                getattr(getattr(rj, "template", None), "spec", None),
-                                "completions",
-                                None,
-                            ),
-                        }
-                        for rj in replicated_jobs
-                    ]
+        data = _extract_runtime_metadata(rt)
 
         if include_packages:
-            data.update(_fetch_packages_via_pod(name))
+            data.update(_fetch_packages_via_pod(name, runtime_obj=rt))
 
         return ToolResponse(data=data).model_dump()
 

@@ -6,11 +6,12 @@ repos:
         args: [--allow-multiple-documents]
       - id: end-of-file-fixer
       - id: trailing-whitespace
+      - id: check-added-large-files
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.14
     hooks:
       # Lint + auto-fix (must run before format)
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       # Format after fixes
       - id: ruff-format

@@ -1,5 +1,7 @@
 # Kubeflow MCP Server
 
+<!-- mcp-name: io.github.kubeflow/mcp-server -->
+
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org) [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) [![Coverage Status](https://coveralls.io/repos/github/kubeflow/mcp-server/badge.svg?branch=main)](https://coveralls.io/github/kubeflow/mcp-server?branch=main) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kubeflow/mcp-server)
 
 Proposal: [KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server) · [ROADMAP](ROADMAP.md) · [SECURITY](SECURITY.md) · [CONTRIBUTING](CONTRIBUTING.md)
@@ -52,18 +54,35 @@ docker run --rm -p 8000:8000 \
 
 The server listens on `http://localhost:8000/mcp`.
 
+Container and Kubernetes probes are available without MCP authentication:
+
+```text
+GET /health  # liveness: the server process is accepting HTTP requests
+GET /ready   # readiness: configured clients imported and packaged resources loaded
+```
+
+`/ready` returns 200 only when both `clients_ready` and `resources_ready` are true. It does
+not contact Kubernetes or other APIs, so it is not a live dependency check. A missing
+packaged resource Markdown file keeps `/ready` at 503 even though `/health` and registered
+tools remain available; check the server logs and package contents rather than cluster
+dependencies.
+
 **Environment variables**
 
 | Variable | Default | Description |
 |---|---|---|
-| `MCP_TRANSPORT` | `http` | Transport protocol (`http`, `sse`, `stdio`) |
+| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `sse`, `stdio`) |
 | `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth |
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
 | `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
-| `LOG_FORMAT` | `json` | Log format (`json`, `console`) |
+| `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
+| `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
+| `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
+| `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin validation (not recommended) |
+| `LOG_FORMAT` | _(auto)_ | Log format (`json`, `console`); defaults to `console` in an interactive terminal and `json` otherwise |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 **MCP client config (HTTP transport)**
@@ -80,6 +99,8 @@ The server listens on `http://localhost:8000/mcp`.
 ```
 
 For in-cluster deployments, replace `localhost:8000` with the Kubernetes Service address and mount `KUBEFLOW_MCP_AUTH_TOKEN` from a Secret.
+
+> **Note:** DNS rebinding protection allows only loopback `Host`/`Origin` headers by default. When exposing the server through a Service or Ingress, set `KUBEFLOW_MCP_ALLOWED_HOSTS` (e.g. `KUBEFLOW_MCP_ALLOWED_HOSTS=kubeflow-mcp.kubeflow.svc:*,mcp.example.com`) or requests will be rejected with HTTP 421.
 
 ### Example: Fine-tune a model via AI agent
 
@@ -101,7 +122,8 @@ Agent calls: fine_tune(..., confirmed=True) → TrainJob "train-gemma-abc" creat
 Agent calls: get_training_logs("train-gemma-abc") → training progress...
 ```
 
-Every mutating tool requires `confirmed=True` — agents always preview before submitting.
+Most mutating tools require `confirmed=True` and return a preview before making changes.
+`update_training_job` is a legacy exception and immediately suspends or resumes a training job.
 
 ### MCP Client Config
 
@@ -159,17 +181,27 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 ### `kubeflow-mcp serve`
 
 ```bash
+# Modules: trainer, optimizer (stub), hub (stub)
+# Persona: readonly | data-scientist | ml-engineer | platform-admin
+# Mode: full | progressive | semantic
+# Instruction tier: full | compact | minimal
+# Transport: stdio | http | sse
+# Auth token: bearer token for HTTP auth (dev/staging)
+# OTel endpoint: optional OTLP HTTP endpoint for tracing
+# Log level: DEBUG | INFO | WARNING | ERROR
+# Log format: console | json (auto-detected if omitted)
+# No banner: suppress the FastMCP startup banner
 kubeflow-mcp serve \
-  --clients trainer \             # modules: trainer, optimizer (stub), hub (stub)
-  --persona ml-engineer \         # readonly | data-scientist | ml-engineer | platform-admin
-  --mode full \                   # full | progressive | semantic
-  --instruction-tier full \       # full | compact | minimal
-  --transport stdio \             # stdio | http | sse
-  --auth-token SECRET \           # bearer token for HTTP auth (dev/staging)
-  --otel-endpoint URL \           # OTLP HTTP endpoint (optional tracing)
-  --log-level INFO \              # DEBUG | INFO | WARNING | ERROR
-  --log-format console \          # console | json (auto-detected if omitted)
-  --no-banner                     # suppress startup banner
+  --clients trainer \
+  --persona ml-engineer \
+  --mode full \
+  --instruction-tier full \
+  --transport stdio \
+  --auth-token SECRET \
+  --otel-endpoint URL \
+  --log-level INFO \
+  --log-format console \
+  --no-banner
 ```
 
 `--mode progressive` exposes 3 meta-tools (~85 tokens) for hierarchical discovery. `--mode semantic` exposes 2 meta-tools (~69 tokens) using embedding search. Both reduce token consumption significantly for agent workflows.
@@ -198,24 +230,11 @@ Without auth configured, the server logs a warning that the HTTP endpoint is ope
 
 </details>
 
-<details>
-<summary>Agent Subcommand</summary>
-
-```bash
-kubeflow-mcp agent \
-  --backend ollama \              # ollama (default; more backends planned)
-  --model qwen3:8b \              # model name for the backend
-  --mode full \                   # full | progressive | semantic
-  --thinking                      # enable thinking output (supported models)
-```
-
-</details>
-
 ## Observability
 
 OpenTelemetry tracing is optional and can be enabled without changing tool code.
 
-- Install optional dependencies: `pip install ".[otel]"`
+- Install optional dependencies from source: `uv sync --group otel`
 - Enable tracing with CLI flag or env var:
 
 ```bash
@@ -227,9 +246,6 @@ kubeflow-mcp serve
 
 Each tool invocation emits a span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
-
-> **Note:** `kubeflow-mcp agent --otel-endpoint ...` emits spans under a separate
-> `kubeflow-mcp-agent` service in Jaeger, distinct from the `kubeflow-mcp` server spans.
 
 ## Development
 
@@ -250,8 +266,9 @@ make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
 
 ## Documentation
 
-
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
+- **[ROADMAP](ROADMAP.md)**: Project roadmap
+- **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening
 - **[KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server)**: Design proposal
 
 ## License

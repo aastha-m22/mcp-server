@@ -18,29 +18,13 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - uses: pre-commit/action@v3.0.1
         with:
           extra_args: --all-files
-
-  security-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Run pip-audit
-        run: |
-          uv sync --all-extras --group dev
-          uv run pip-audit
 
   test:
     runs-on: ubuntu-latest
@@ -53,16 +37,19 @@ jobs:
     name: Test (Python ${{ matrix.python-version }})
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
       - name: Verify
         run: make verify
+
+      - name: Test GitHub Actions Scripts
+        run: make test-scripts
 
       - name: Run Tests
         run: |

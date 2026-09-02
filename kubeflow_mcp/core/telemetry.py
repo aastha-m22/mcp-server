@@ -77,7 +77,7 @@ def _normalize_and_validate_endpoint(endpoint: str | None) -> str:
     # Append the standard OTLP trace path when only a base URL is provided,
     # matching the OTel SDK convention for OTEL_EXPORTER_OTLP_ENDPOINT.
     if not parsed.path or parsed.path == "/":
-        normalized_endpoint = normalized_endpoint.rstrip("/") + "/v1/traces"
+        normalized_endpoint = parsed._replace(path="/v1/traces").geturl()
     return normalized_endpoint
 
 
@@ -99,7 +99,7 @@ def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp
     if not _OTEL_AVAILABLE:
         logger.warning(
             "OpenTelemetry endpoint configured but OTel packages are not installed. "
-            "Install with: pip install '.[otel]'"
+            "Install OpenTelemetry dependencies from source with: uv sync --group otel"
         )
         return False
 

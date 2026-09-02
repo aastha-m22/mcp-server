@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""
+Unit tests for GitHub Actions scripts.
+
+Run with: uv run pytest .github/scripts/test_scripts.py -v
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import pytest
+
+SCRIPTS_DIR = Path(__file__).parent
+
+
+def _assert_valid_toml(content: str) -> None:
+    """Assert `content` parses as TOML. No-op on Python 3.10 (no stdlib tomllib)."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return
+    tomllib.loads(content)
+
+
+class TestCompareVersions:
+    """Tests for compare_versions.py"""
+
+    def run_compare(self, current: str, target: str) -> int:
+        """Helper to run compare_versions.py and return exit code"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "compare_versions.py"), current, target],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return result.returncode
+
+    def test_upgrade_needed(self):
+        """Current version is less than target - should return 0 (upgrade needed)"""
+        assert self.run_compare("2.0.0", "2.1.0") == 0
+        assert self.run_compare("1.0.0", "2.0.0") == 0
+        assert self.run_compare("2.0.0", "2.0.1") == 0
+
+    def test_no_upgrade_needed(self):
+        """Current version equals or exceeds target - should return 1 (no upgrade)"""
+        assert self.run_compare("2.1.0", "2.0.0") == 1
+        assert self.run_compare("2.0.0", "2.0.0") == 1
+        assert self.run_compare("3.0.0", "2.9.9") == 1
+
+    def test_pre_release_versions(self):
+        """Test PEP 440 pre-release versions"""
+        assert self.run_compare("2.0.0rc1", "2.0.0") == 0
+        assert self.run_compare("2.0.0a1", "2.0.0") == 0
+        assert self.run_compare("2.0.0b1", "2.0.0") == 0
+        assert self.run_compare("2.0.0", "2.0.0rc1") == 1
+
+    def test_post_release_versions(self):
+        """Test PEP 440 post-release versions"""
+        assert self.run_compare("2.0.0", "2.0.0.post1") == 0
+        assert self.run_compare("2.0.0.post1", "2.0.0") == 1
+
+    def test_dev_versions(self):
+        """Test PEP 440 dev versions"""
+        assert self.run_compare("2.0.0.dev1", "2.0.0") == 0
+        assert self.run_compare("2.0.0", "2.0.0.dev1") == 1
+
+    def test_complex_version_comparison(self):
+        """Test complex multi-part version numbers"""
+        assert self.run_compare("2.0.0.1", "2.0.0.2") == 0
+        assert self.run_compare("2.10.0", "2.9.0") == 1  # 10 > 9, not string comparison
+        assert self.run_compare("1.0.0rc1", "1.0.0rc2") == 0
+
+    def test_invalid_version_error(self):
+        """Invalid version should return error code 2"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "compare_versions.py"), "invalid", "2.0.0"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 2
+        assert "Error" in result.stderr
+
+    def test_missing_arguments(self):
+        """Missing arguments should return error code 2"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "compare_versions.py"), "2.0.0"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 2
+
+
+class TestExtractVersion:
+    """Tests for extract_version.py"""
+
+    def run_extract(self, tree_output: str, package: str) -> tuple[int, str, str]:
+        """Helper to run extract_version.py and return (exit_code, stdout, stderr)"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "extract_version.py"), package],
+            input=tree_output,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+    def test_simple_version_extraction(self):
+        """Extract version from simple uv tree output"""
+        exit_code, version, _ = self.run_extract("requests v2.31.0", "requests")
+        assert exit_code == 0
+        assert version == "2.31.0"
+
+    def test_version_with_metadata(self):
+        """Extract version from tree output with metadata"""
+        exit_code, version, _ = self.run_extract("├── requests v2.31.0 (transitive)", "requests")
+        assert exit_code == 0
+        assert version == "2.31.0"
+
+    def test_pre_release_version(self):
+        """Extract pre-release version"""
+        exit_code, version, _ = self.run_extract("package v1.0.0rc1", "package")
+        assert exit_code == 0
+        assert version == "1.0.0rc1"
+
+    def test_post_release_version(self):
+        """Extract post-release version"""
+        exit_code, version, _ = self.run_extract("package v1.0.0.post1", "package")
+        assert exit_code == 0
+        assert version == "1.0.0.post1"
+
+    def test_dev_version(self):
+        """Extract dev version"""
+        exit_code, version, _ = self.run_extract("package v1.0.0.dev1", "package")
+        assert exit_code == 0
+        assert version == "1.0.0.dev1"
+
+    def test_package_not_found(self):
+        """Package not in tree output should return error"""
+        exit_code, _, stderr = self.run_extract("other-package v1.0.0", "requests")
+        assert exit_code == 1
+        assert "Could not find version" in stderr
+
+    def test_multiline_tree_output(self):
+        """Extract from realistic multi-line uv tree output"""
+        tree_output = """
+        project v1.0.0
+        ├── requests v2.31.0
+        │   ├── certifi v2023.7.22
+        │   └── urllib3 v2.0.4
+        └── pytest v7.4.0
+        """
+        exit_code, version, _ = self.run_extract(tree_output, "requests")
+        assert exit_code == 0
+        assert version == "2.31.0"
+
+
+class TestUpdateOverrides:
+    """Tests for update_overrides.py"""
+
+    def run_update(
+        self, pyproject_content: str, package: str, target: str, date: str, advisory: str
+    ) -> tuple[int, str]:
+        """Run update_overrides.py against a throwaway pyproject.toml in an isolated dir."""
+        original_dir = os.getcwd()
+        with TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                Path("pyproject.toml").write_text(pyproject_content)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPTS_DIR / "update_overrides.py"),
+                        package,
+                        target,
+                        date,
+                        advisory,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                return result.returncode, Path("pyproject.toml").read_text()
+            finally:
+                os.chdir(original_dir)
+
+    def test_create_tool_uv_section(self):
+        """Create [tool.uv] section if it doesn't exist"""
+        pyproject = "[project]\nname = 'test'\n"
+        exit_code, updated = self.run_update(
+            pyproject, "requests", "requests==2.31.0", "2025-01-15", "https://advisory.com"
+        )
+
+        assert exit_code == 0
+        assert "[tool.uv]" in updated
+        assert "override-dependencies = [" in updated
+        assert '"requests==2.31.0",' in updated
+        assert "# requests==2.31.0 - Added 2025-01-15" in updated
+
+    def test_add_to_existing_tool_uv(self):
+        """Add override-dependencies to existing [tool.uv]"""
+        pyproject = "[project]\nname = 'test'\n\n[tool.uv]\n"
+        exit_code, updated = self.run_update(
+            pyproject, "requests", "requests==2.31.0", "2025-01-15", "https://advisory.com"
+        )
+
+        assert exit_code == 0
+        assert "override-dependencies = [" in updated
+        assert '"requests==2.31.0",' in updated
+
+    def test_update_existing_override(self):
+        """Update existing package override to new version"""
+        pyproject = """[project]
+name = 'test'
+
+[tool.uv]
+# Security overrides - Review periodically and remove if parent constraints allow natural upgrade
+override-dependencies = [
+    # requests==2.30.0 - Added 2025-01-01 for security fix - https://old.com
+    "requests==2.30.0",
+]
+"""
+        advisory_url = "https://new.com"
+        exit_code, updated = self.run_update(
+            pyproject, "requests", "requests==2.31.0", "2025-01-15", advisory_url
+        )
+
+        assert exit_code == 0
+        assert '"requests==2.31.0",' in updated
+        assert "2.30.0" not in updated  # Old version removed
+        assert "2025-01-15" in updated  # New date
+        assert (
+            f"# requests==2.31.0 - Added 2025-01-15 for security fix - {advisory_url}" in updated
+        )  # New advisory comment
+
+    def test_add_second_override(self):
+        """Add second package to existing overrides"""
+        pyproject = """[project]
+name = 'test'
+
+[tool.uv]
+override-dependencies = [
+    # requests==2.31.0 - Added 2025-01-15 for security fix - https://advisory.com
+    "requests==2.31.0",
+]
+"""
+        exit_code, updated = self.run_update(
+            pyproject, "urllib3", "urllib3==2.0.5", "2025-01-16", "https://urllib-advisory.com"
+        )
+
+        assert exit_code == 0
+        assert '"requests==2.31.0",' in updated
+        assert '"urllib3==2.0.5",' in updated
+        # Should be alphabetically sorted
+        lines = updated.split("\n")
+        requests_line = next(i for i, line in enumerate(lines) if "requests==" in line)
+        urllib_line = next(i for i, line in enumerate(lines) if "urllib3==" in line)
+        assert requests_line < urllib_line  # requests comes before urllib3
+
+    def test_multiline_array_preserved(self):
+        """Ensure output is always multi-line array format"""
+        pyproject = "[project]\nname = 'test'\n"
+        exit_code, updated = self.run_update(
+            pyproject, "pkg", "pkg==1.0.0", "2025-01-15", "https://advisory.com"
+        )
+
+        assert exit_code == 0
+        assert "override-dependencies = [\n" in updated
+        assert '    "pkg==1.0.0",\n' in updated
+        assert "]\n" in updated
+
+    def test_single_line_array_converted(self):
+        """Single-line array should be parsed and converted to multi-line"""
+        pyproject = """[project]
+name = 'test'
+
+[tool.uv]
+override-dependencies = ["pkg1==1.0.0", "pkg2==2.0.0"]
+"""
+        exit_code, updated = self.run_update(
+            pyproject, "pkg3", "pkg3==3.0.0", "2025-01-15", "https://advisory.com"
+        )
+
+        assert exit_code == 0
+        assert '"pkg1==1.0.0",' in updated
+        assert '"pkg2==2.0.0",' in updated
+        assert '"pkg3==3.0.0",' in updated
+        assert "override-dependencies = [\n" in updated
+        # Should not have duplicate override-dependencies
+        assert updated.count("override-dependencies") == 1
+
+    def test_create_section_no_duplicate_key(self):
+        """Creating [tool.uv] from scratch emits exactly one override key"""
+        pyproject = "[project]\nname = 'test'\n"
+        exit_code, updated = self.run_update(
+            pyproject, "requests", "requests==2.31.0", "2025-01-15", "https://advisory.com"
+        )
+
+        assert exit_code == 0
+        assert updated.count("override-dependencies") == 1
+        _assert_valid_toml(updated)
+
+    def test_indented_override_dependencies(self):
+        """Indented override key is replaced, not duplicated"""
+        pyproject = (
+            "[project]\nname = 'test'\n\n[tool.uv]\n"
+            "  override-dependencies = [\n"
+            '      "flask==3.0.0",\n'
+            '      "requests==2.20.0",\n'
+            "  ]\n"
+        )
+        exit_code, updated = self.run_update(
+            pyproject, "requests", "requests==2.31.0", "2025-01-15", "https://advisory.com"
+        )
+
+        assert exit_code == 0
+        assert updated.count("override-dependencies") == 1
+        assert '"requests==2.31.0",' in updated
+        assert "2.20.0" not in updated  # old indented entry replaced
+        assert '"flask==3.0.0",' in updated  # sibling preserved
+        _assert_valid_toml(updated)
+
+
+class TestUpdateScannerPin:
+    """Tests for update_scanner_pin.py"""
+
+    WORKFLOW = (
+        "steps:\n"
+        "  - name: Install OSV-Scanner\n"
+        "    run: |\n"
+        '      OSV_VERSION="2.4.0"\n'
+        f'      EXPECTED_SHA="{"a" * 64}"\n'
+        "      curl -fsSL ...\n"
+    )
+
+    def run_pin(self, content: str, version: str, sha: str) -> tuple[int, str]:
+        """Run update_scanner_pin.py against a temp workflow file."""
+        original_dir = os.getcwd()
+        with TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                Path("wf.yaml").write_text(content)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPTS_DIR / "update_scanner_pin.py"),
+                        "wf.yaml",
+                        version,
+                        sha,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                return result.returncode, Path("wf.yaml").read_text()
+            finally:
+                os.chdir(original_dir)
+
+    def test_updates_both_lines(self):
+        """Happy path: both version and checksum lines are rewritten"""
+        exit_code, updated = self.run_pin(self.WORKFLOW, "2.5.0", "b" * 64)
+        assert exit_code == 0
+        assert 'OSV_VERSION="2.5.0"' in updated
+        assert f'EXPECTED_SHA="{"b" * 64}"' in updated
+        assert "2.4.0" not in updated
+        assert "a" * 64 not in updated
+
+    def test_rejects_malformed_version(self):
+        """Non-X.Y.Z versions (including shell metacharacters) are rejected"""
+        for bad in ["2.5", "v2.5.0", '2.5.0"; rm -rf /', "2.5.0-rc1", ""]:
+            exit_code, updated = self.run_pin(self.WORKFLOW, bad, "b" * 64)
+            assert exit_code == 1
+            assert updated == self.WORKFLOW  # untouched
+
+    def test_rejects_malformed_checksum(self):
+        """Checksums that are not 64-char lowercase hex are rejected"""
+        for bad in ["b" * 63, "B" * 64, "xyz", "", "b" * 64 + '"']:
+            exit_code, updated = self.run_pin(self.WORKFLOW, "2.5.0", bad)
+            assert exit_code == 1
+            assert updated == self.WORKFLOW
+
+    def test_fails_when_lines_missing(self):
+        """A workflow without both pin lines fails instead of silently half-updating"""
+        no_sha = 'OSV_VERSION="2.4.0"\n'
+        exit_code, updated = self.run_pin(no_sha, "2.5.0", "b" * 64)
+        assert exit_code == 1
+        assert updated == no_sha
+
+    def test_missing_file(self):
+        """A nonexistent workflow path exits nonzero"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "update_scanner_pin.py"),
+                "does-not-exist.yaml",
+                "2.5.0",
+                "b" * 64,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 1
+
+
+if __name__ == "__main__":
+    # Allow running with: python test_scripts.py
+    pytest.main([__file__, "-v"])

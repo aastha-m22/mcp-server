@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -84,6 +85,18 @@ def test_setup_tracing_noop_when_otel_unavailable(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", False)
     monkeypatch.setattr(telemetry, "_tracing_initialized", False)
     assert telemetry.setup_tracing("http://collector:4318/v1/traces") is False
+
+
+def test_setup_tracing_logs_install_command_when_otel_unavailable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", False)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+
+    with caplog.at_level(logging.WARNING, logger=telemetry.__name__):
+        assert telemetry.setup_tracing("http://collector:4318/v1/traces") is False
+
+    assert "uv sync --group otel" in caplog.text
 
 
 def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,6 +216,13 @@ def test_setup_tracing_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) ->
 def test_setup_tracing_rejects_invalid_endpoint() -> None:
     with pytest.raises(ValueError, match="Invalid OpenTelemetry endpoint"):
         telemetry.setup_tracing("localhost:4318/v1/traces")
+
+
+def test_normalize_endpoint_preserves_query_parameters() -> None:
+    assert (
+        telemetry._normalize_and_validate_endpoint("https://collector.example.com?tenant=demo")
+        == "https://collector.example.com/v1/traces?tenant=demo"
+    )
 
 
 def test_setup_tracing_reuses_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None:
