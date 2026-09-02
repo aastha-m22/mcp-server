@@ -450,7 +450,7 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
             model_dump=lambda: {
                 "success": False,
                 "error": "Namespace 'restricted' not allowed by policy",
-                "error_code": "PERMISSION_DENIED",
+                "error_code": ErrorCode.PERMISSION_DENIED,
             }
         ),
     ):
