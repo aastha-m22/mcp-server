@@ -21,6 +21,7 @@ K8s API interaction tests require mocking the SDK and are marked as TODOs.
 from __future__ import annotations
 from types import SimpleNamespace
 
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -42,6 +43,7 @@ from kubeflow_mcp.trainer.api.discovery import (
     list_runtimes,
     list_training_jobs,
 )
+
 
 class TestJobStatusFilterAliases:
     def test_succeeded_maps_to_complete(self):
