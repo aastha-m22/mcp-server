@@ -306,12 +306,9 @@ class TestGetRuntimeImage:
         assert image == "docker.io/kubeflow/fallback:v1"
 
 
-
 # ---------------------------------------------------------------------------
 # list_training_jobs
 # ---------------------------------------------------------------------------
-
-
 
 
 def _fake_job(name, status="Running", runtime_name="torch-tune"):
