@@ -15,7 +15,6 @@
 """Tests for trainer/api/discovery.py.
 
 Covers discovery behavior, input validation, and status filter aliasing.
-K8s API interaction tests require mocking the SDK.
 """
 
 from __future__ import annotations
@@ -444,17 +443,15 @@ def test_get_training_job_complete_status_has_no_next_steps():
 
 
 def test_get_training_job_namespace_not_allowed_short_circuits():
+    from kubeflow_mcp.common.types import ToolError as ToolErrorModel
+
     with patch(
         "kubeflow_mcp.trainer.api.discovery.check_namespace_allowed",
-        return_value=SimpleNamespace(
-            model_dump=lambda: {
-                "success": False,
-                "error": "Namespace 'restricted' not allowed by policy",
-                "error_code": ErrorCode.PERMISSION_DENIED,
-            }
+        return_value=ToolErrorModel(
+            error="namespace blocked", error_code="PERMISSION_DENIED"
         ),
     ):
         result = get_training_job("job-a", namespace="restricted")
 
     assert result["success"] is False
-    assert result["error_code"] == "PERMISSION_DENIED"
+    assert result["error_code"] == ErrorCode.PERMISSION_DENIED
