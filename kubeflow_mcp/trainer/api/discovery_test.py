@@ -443,7 +443,6 @@ def test_get_training_job_complete_status_has_no_next_steps():
     assert "next_steps" not in result["data"]
 
 
-
 def test_get_training_job_namespace_not_allowed_short_circuits():
     with patch(
         "kubeflow_mcp.trainer.api.discovery.check_namespace_allowed",
