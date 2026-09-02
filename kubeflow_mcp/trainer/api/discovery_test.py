@@ -15,7 +15,7 @@
 """Tests for trainer/api/discovery.py.
 
 Covers discovery behavior, input validation, and status filter aliasing.
-K8s API interaction tests require mocking the SDK and are marked as TODOs.
+K8s API interaction tests require mocking the SDK.
 """
 
 from __future__ import annotations
@@ -377,7 +377,7 @@ def test_list_training_jobs_sdk_error_wrapped_as_tool_error():
     ):
         result = list_training_jobs()
     assert result["success"] is False
-    assert result["error_code"] == "SDK_ERROR"
+    assert result["error_code"] == ErrorCode.SDK_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +411,7 @@ def test_list_runtimes_sdk_error_wrapped():
     with patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client", return_value=client):
         result = list_runtimes()
     assert result["success"] is False
-    assert result["error_code"] == "SDK_ERROR"
+    assert result["error_code"] == ErrorCode.SDK_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -441,3 +441,21 @@ def test_get_training_job_complete_status_has_no_next_steps():
     ):
         result = get_training_job("job-a")
     assert "next_steps" not in result["data"]
+
+
+
+def test_get_training_job_namespace_not_allowed_short_circuits():
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.check_namespace_allowed",
+        return_value=SimpleNamespace(
+            model_dump=lambda: {
+                "success": False,
+                "error": "Namespace 'restricted' not allowed by policy",
+                "error_code": "PERMISSION_DENIED",
+            }
+        ),
+    ):
+        result = get_training_job("job-a", namespace="restricted")
+
+    assert result["success"] is False
+    assert result["error_code"] == "PERMISSION_DENIED"
