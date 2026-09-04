@@ -447,7 +447,7 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     with patch(
         "kubeflow_mcp.trainer.api.discovery.check_namespace_allowed",
-        return_value=ToolErrorModel( error="namespace blocked", error_code="PERMISSION_DENIED"),
+         return_value=ToolErrorModel(error="namespace blocked", error_code="PERMISSION_DENIED"),
     ):
         result = get_training_job("job-a", namespace="restricted")
 
