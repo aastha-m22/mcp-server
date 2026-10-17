@@ -79,6 +79,11 @@ markers = [
     "smoke: basic import and metadata checks",
 ]
 [tool.uv]
+# Security overrides - Review periodically and remove if parent constraints allow natural upgrade
+override-dependencies = [
+    # mcp==2.2.0 - Added 2026-10-17 for security fix - https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-84m7-p3x7-pcfv
+    "mcp==2.2.0",
+]
 # Pin transitive deps to versions that resolve known CVEs detected by the OSV-Scanner workflow.
 constraint-dependencies = [
     "idna>=3.15",       # CVE-2026-45409
